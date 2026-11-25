@@ -3220,6 +3220,1098 @@ print(graphique_tendance)
 
 
 
-# petit test
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# ANALYSE DES PROFILS COMPORTEMENTAUX DES PECHEUSES
+# CLASSIFICATION + PARAMETRAGE DU SYSTEME MULTI-AGENTS
+# ============================================================
+
+# Objectifs :
+# 1. Identifier les trois profils comportementaux
+# 2. Décrire les comportements de chaque profil
+# 3. Calculer la probabilité d'aller pêcher pour chaque profil
+# 4. Calculer les probabilités de choix des zones
+# 5. Produire une table de paramètres directement utilisable
+#    dans le système multi-agents (SMA)
+
+# ============================================================
+# 0. PACKAGES
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(stringi)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(writexl)
+
+
+# ============================================================
+# 1. PREPARATION DES DONNEES
+# ============================================================
+
+# ------------------------------------------------------------
+# 1.1 Nettoyage des noms des zones
+# ------------------------------------------------------------
+
+df <- df %>%
+  mutate(
+    
+    zone_clean = as.character(zone),
+    
+    zone_clean = str_to_lower(zone_clean),
+    
+    zone_clean = stri_trans_general(
+      zone_clean,
+      "Latin-ASCII"
+    ),
+    
+    zone_clean = str_trim(zone_clean)
+    
+  )
+
+
+# ------------------------------------------------------------
+# 1.2 Recodage des zones
+# ------------------------------------------------------------
+
+df <- df %>%
+  mutate(
+    
+    zone_profil = case_when(
+      
+      zone_clean == "village" ~ "village",
+      
+      zone_clean == "rouge" ~ "rouge",
+      
+      zone_clean == "jaune" ~ "jaune",
+      
+      zone_clean == "vert" ~ "vert",
+      
+      is.na(zone_clean) |
+        zone_clean == "" ~ NA_character_,
+      
+      TRUE ~ "autre"
+      
+    )
+    
+  )
+
+
+# Vérification
+
+print(table(df$zone_profil, useNA = "ifany"))
+
+
+# ------------------------------------------------------------
+# 1.3 Création de l'identifiant individuel
+# ------------------------------------------------------------
+
+df <- df %>%
+  mutate(
+    
+    id_individu = if_else(
+      
+      !is.na(id_pecheuse) & !is.na(village),
+      
+      paste(
+        village,
+        id_pecheuse,
+        sep = "_"
+      ),
+      
+      NA_character_
+      
+    )
+    
+  )
+
+
+cat(
+  "Nombre de pêcheuses identifiées :",
+  n_distinct(df$id_individu, na.rm = TRUE),
+  "\n"
+)
+
+
+# ============================================================
+# 2. CONSTRUCTION DE LA BASE COMPORTEMENTALE
+# ============================================================
+
+# On conserve les observations avec un identifiant
+# individuel et une zone renseignée.
+
+df_comportement <- df %>%
+  
+  filter(
+    !is.na(id_individu),
+    !is.na(zone_profil)
+  )
+
+
+# ------------------------------------------------------------
+# 2.1 Comptage des observations par pêcheuse et par zone
+# ------------------------------------------------------------
+
+comportement_individuel <- df_comportement %>%
+  
+  group_by(
+    village,
+    id_individu,
+    zone_profil
+  ) %>%
+  
+  summarise(
+    nb_jours = n(),
+    .groups = "drop"
+  ) %>%
+  
+  mutate(
+    zone_profil = paste0(
+      "zone_",
+      zone_profil
+    )
+  ) %>%
+  
+  pivot_wider(
+    names_from = zone_profil,
+    values_from = nb_jours,
+    values_fill = 0
+  )
+
+
+# ============================================================
+# 3. COMPLETER LES COLONNES DE ZONES
+# ============================================================
+
+zones_attendues <- c(
+  "zone_village",
+  "zone_rouge",
+  "zone_jaune",
+  "zone_vert",
+  "zone_autre"
+)
+
+
+for(z in zones_attendues) {
+  
+  if(!z %in% names(comportement_individuel)) {
+    
+    comportement_individuel[[z]] <- 0
+    
+  }
+  
+}
+
+
+# ============================================================
+# 4. CALCUL DES PROPORTIONS INDIVIDUELLES
+# ============================================================
+
+comportement_individuel <- comportement_individuel %>%
+  
+  mutate(
+    
+    nb_jours_observes = rowSums(
+      across(all_of(zones_attendues))
+    ),
+    
+    prop_village =
+      zone_village / nb_jours_observes,
+    
+    prop_rouge =
+      zone_rouge / nb_jours_observes,
+    
+    prop_jaune =
+      zone_jaune / nb_jours_observes,
+    
+    prop_vert =
+      zone_vert / nb_jours_observes,
+    
+    prop_autre =
+      zone_autre / nb_jours_observes
+    
+  )
+
+
+# Vérification des proportions
+
+comportement_individuel <- comportement_individuel %>%
+  
+  mutate(
+    
+    somme_proportions =
+      prop_village +
+      prop_rouge +
+      prop_jaune +
+      prop_vert +
+      prop_autre
+    
+  )
+
+
+print(
+  summary(comportement_individuel$somme_proportions)
+)
+
+
+# ============================================================
+# 5. FILTRER LES PECHEUSES TROP PEU OBSERVEES
+# ============================================================
+
+seuil_jours <- 5
+
+comportement_classification <- comportement_individuel %>%
+  
+  filter(
+    nb_jours_observes >= seuil_jours
+  )
+
+
+cat(
+  "Pêcheuses retenues :",
+  nrow(comportement_classification),
+  "\n"
+)
+
+cat(
+  "Pêcheuses exclues :",
+  nrow(comportement_individuel) -
+    nrow(comportement_classification),
+  "\n"
+)
+
+
+# ============================================================
+# 6. CLASSIFICATION HIERARCHIQUE
+# ============================================================
+
+# Variables utilisées pour la classification
+
+variables_classification <- c(
+  "prop_village",
+  "prop_rouge",
+  "prop_jaune",
+  "prop_vert",
+  "prop_autre"
+)
+
+
+# Matrice des variables
+
+matrice_classification <- comportement_classification %>%
+  
+  select(
+    all_of(variables_classification)
+  ) %>%
+  
+  as.data.frame()
+
+
+# ------------------------------------------------------------
+# 6.1 Identifier les variables non constantes
+# ------------------------------------------------------------
+
+ecarts_types <- sapply(
+  matrice_classification,
+  sd,
+  na.rm = TRUE
+)
+
+variables_actives <- names(
+  ecarts_types[
+    is.finite(ecarts_types) &
+      ecarts_types > 0
+  ]
+)
+
+
+if(length(variables_actives) < 2) {
+  
+  stop("Pas assez de variables variables pour réaliser la classification.")
+  
+}
+
+
+matrice_classification <- matrice_classification %>%
+  
+  select(
+    all_of(variables_actives)
+  )
+
+
+# ------------------------------------------------------------
+# 6.2 Standardisation
+# ------------------------------------------------------------
+
+matrice_standardisee <- scale(
+  matrice_classification
+)
+
+
+# ------------------------------------------------------------
+# 6.3 Calcul des distances
+# ------------------------------------------------------------
+
+distance_individus <- dist(
+  matrice_standardisee,
+  method = "euclidean"
+)
+
+
+# ------------------------------------------------------------
+# 6.4 Classification hiérarchique de Ward
+# ------------------------------------------------------------
+
+classification_cah <- hclust(
+  distance_individus,
+  method = "ward.D2"
+)
+
+
+# ============================================================
+# 7. EVALUATION DU NOMBRE DE PROFILS
+# ============================================================
+
+k_max <- min(
+  8,
+  nrow(comportement_classification) - 1
+)
+
+
+resultats_silhouette <- data.frame(
+  
+  k = 2:k_max,
+  
+  silhouette_moyenne = NA_real_
+  
+)
+
+
+for(i in seq_len(nrow(resultats_silhouette))) {
+  
+  k <- resultats_silhouette$k[i]
+  
+  groupes <- cutree(
+    classification_cah,
+    k = k
+  )
+  
+  sil <- silhouette(
+    groupes,
+    distance_individus
+  )
+  
+  resultats_silhouette$silhouette_moyenne[i] <-
+    mean(sil[, 3])
+  
+}
+
+
+print(resultats_silhouette)
+
+
+# Graphique de silhouette
+
+p_silhouette <- ggplot(
+  resultats_silhouette,
+  aes(
+    x = k,
+    y = silhouette_moyenne
+  )
+) +
+  
+  geom_line() +
+  
+  geom_point(size = 3) +
+  
+  scale_x_continuous(
+    breaks = 2:k_max
+  ) +
+  
+  theme_minimal() +
+  
+  labs(
+    title = "Choix du nombre de profils",
+    x = "Nombre de profils",
+    y = "Silhouette moyenne"
+  )
+
+
+print(p_silhouette)
+
+
+# ------------------------------------------------------------
+# 7.1 Fixer le nombre de profils à trois
+# ------------------------------------------------------------
+
+# On conserve trois profils pour le SMA.
+
+k_profils <- 3
+
+if(nrow(comportement_classification) <= k_profils) {
+  
+  stop("Nombre insuffisant de pêcheuses pour créer trois profils.")
+  
+}
+
+
+# ============================================================
+# 8. ATTRIBUTION DES PROFILS
+# ============================================================
+
+groupes_optimaux <- cutree(
+  classification_cah,
+  k = k_profils
+)
+
+
+comportement_classification <- comportement_classification %>%
+  
+  mutate(
+    
+    profil = factor(
+      groupes_optimaux,
+      levels = 1:3
+    )
+    
+  )
+
+
+# ============================================================
+# 9. CARACTERISATION DES PROFILS
+# ============================================================
+
+matrice_profils <- comportement_classification %>%
+  
+  group_by(profil) %>%
+  
+  summarise(
+    
+    nb_pecheuses = n(),
+    
+    jours_observes_moyens =
+      mean(nb_jours_observes),
+    
+    prop_village =
+      mean(prop_village),
+    
+    prop_rouge =
+      mean(prop_rouge),
+    
+    prop_jaune =
+      mean(prop_jaune),
+    
+    prop_vert =
+      mean(prop_vert),
+    
+    prop_autre =
+      mean(prop_autre),
+    
+    .groups = "drop"
+    
+  )
+
+
+print(matrice_profils)
+
+
+# ============================================================
+# 10. EFFECTIFS ET REPARTITION DES PROFILS
+# ============================================================
+
+effectifs_profils <- comportement_classification %>%
+  
+  count(
+    profil,
+    name = "nb_pecheuses"
+  ) %>%
+  
+  mutate(
+    
+    pourcentage =
+      100 * nb_pecheuses / sum(nb_pecheuses)
+    
+  )
+
+
+print(effectifs_profils)
+
+
+# ============================================================
+# 11. REPARTITION DES PROFILS PAR VILLAGE
+# ============================================================
+
+profils_village <- comportement_classification %>%
+  
+  count(
+    village,
+    profil,
+    name = "nb_pecheuses"
+  ) %>%
+  
+  group_by(village) %>%
+  
+  mutate(
+    
+    total_village = sum(nb_pecheuses),
+    
+    pourcentage_village =
+      100 * nb_pecheuses / total_village
+    
+  ) %>%
+  
+  ungroup()
+
+
+print(profils_village)
+
+
+# ============================================================
+# 12. PREPARATION DES DONNEES POUR LE SMA
+# ============================================================
+
+# On récupère l'appartenance de chaque pêcheuse à son profil.
+
+profils_individuels <- comportement_classification %>%
+  
+  select(
+    village,
+    id_individu,
+    profil
+  )
+
+
+# On rattache le profil aux observations journalières.
+
+# IMPORTANT :
+# On utilise la variable peche pour identifier la participation :
+# 0 = ne pêche pas
+# 1 = pêche
+
+df_sma <- df %>%
+  
+  filter(
+    
+    !is.na(id_individu),
+    
+    peche %in% c(0, 1)
+    
+  ) %>%
+  
+  inner_join(
+    
+    profils_individuels,
+    
+    by = c(
+      "village",
+      "id_individu"
+    )
+    
+  )
+
+
+# Vérification de la cohérence entre peche et zone
+
+print(
+  table(
+    df_sma$peche,
+    df_sma$zone_profil,
+    useNA = "ifany"
+  )
+)
+
+
+# ============================================================
+# 13. CALCUL DES PROBABILITES INDIVIDUELLES
+# ============================================================
+
+# Pour chaque pêcheuse, on calcule :
+#
+# - sa proportion de journées de pêche
+# - sa proportion de choix de la zone rouge
+# - sa proportion de choix de la zone jaune
+# - sa proportion de choix de la zone verte
+#
+# Les proportions des zones sont calculées uniquement
+# parmi les journées de pêche avec une zone reconnue.
+
+
+probabilites_individuelles <- df_sma %>%
+  
+  group_by(
+    
+    village,
+    id_individu,
+    profil
+    
+  ) %>%
+  
+  summarise(
+    
+    # Nombre total de journées renseignées
+    nb_jours = n(),
+    
+    # Nombre de journées de pêche
+    nb_jours_peche = sum(peche == 1),
+    
+    # Probabilité individuelle d'aller pêcher
+    p_peche_individuelle =
+      mean(peche == 1),
+    
+    # Nombre de journées par zone
+    nb_rouge = sum(
+      peche == 1 &
+        zone_profil == "rouge",
+      na.rm = TRUE
+    ),
+    
+    nb_jaune = sum(
+      peche == 1 &
+        zone_profil == "jaune",
+      na.rm = TRUE
+    ),
+    
+    nb_vert = sum(
+      peche == 1 &
+        zone_profil == "vert",
+      na.rm = TRUE
+    ),
+    
+    # Nombre de journées de pêche avec une zone reconnue
+    nb_zones_connues = sum(
+      peche == 1 &
+        zone_profil %in% c(
+          "rouge",
+          "jaune",
+          "vert"
+        ),
+      na.rm = TRUE
+    ),
+    
+    # Nombre de journées de pêche avec une zone
+    # manquante ou non reconnue
+    nb_zones_non_classees = sum(
+      peche == 1 &
+        (
+          is.na(zone_profil) |
+            !zone_profil %in% c(
+              "rouge",
+              "jaune",
+              "vert"
+            )
+        ),
+      na.rm = TRUE
+    ),
+    
+    .groups = "drop"
+    
+  ) %>%
+  
+  mutate(
+    
+    # Probabilités conditionnelles de choix des zones
+    
+    p_rouge_individuelle = if_else(
+      nb_zones_connues > 0,
+      nb_rouge / nb_zones_connues,
+      NA_real_
+    ),
+    
+    p_jaune_individuelle = if_else(
+      nb_zones_connues > 0,
+      nb_jaune / nb_zones_connues,
+      NA_real_
+    ),
+    
+    p_vert_individuelle = if_else(
+      nb_zones_connues > 0,
+      nb_vert / nb_zones_connues,
+      NA_real_
+    )
+    
+  )
+
+
+# Vérification
+
+print(
+  head(probabilites_individuelles)
+)
+
+
+# ============================================================
+# 14. CALCUL DES PARAMETRES COMPORTEMENTAUX PAR PROFIL
+# ============================================================
+
+# IMPORTANT :
+# Chaque pêcheuse a le même poids dans le calcul de la moyenne
+# de son profil.
+#
+# Les paramètres obtenus correspondent donc au comportement
+# moyen d'une pêcheuse appartenant à chaque profil.
+
+
+parametres_sma <- probabilites_individuelles %>%
+  
+  group_by(profil) %>%
+  
+  summarise(
+    
+    # --------------------------------------------------------
+    # EFFECTIFS
+    # --------------------------------------------------------
+    
+    nb_pecheuses = n(),
+    
+    nb_pecheuses_avec_zone_connue =
+      sum(nb_zones_connues > 0),
+    
+    
+    # --------------------------------------------------------
+    # DECISION 1 : ALLER PECHER OU RESTER AU VILLAGE
+    # --------------------------------------------------------
+    
+    p_peche = mean(
+      p_peche_individuelle,
+      na.rm = TRUE
+    ),
+    
+    
+    # --------------------------------------------------------
+    # DECISION 2 : CHOIX DE LA ZONE
+    # --------------------------------------------------------
+    
+    p_rouge = mean(
+      p_rouge_individuelle,
+      na.rm = TRUE
+    ),
+    
+    p_jaune = mean(
+      p_jaune_individuelle,
+      na.rm = TRUE
+    ),
+    
+    p_vert = mean(
+      p_vert_individuelle,
+      na.rm = TRUE
+    ),
+    
+    
+    # --------------------------------------------------------
+    # PARAMETRES DE CONTROLE
+    # --------------------------------------------------------
+    
+    jours_observes_moyens =
+      mean(nb_jours),
+    
+    jours_peche_moyens =
+      mean(nb_jours_peche),
+    
+    .groups = "drop"
+    
+  )
+
+
+# ============================================================
+# 15. CALCUL DES PROBABILITES GROUPEES
+# ============================================================
+
+# Ces valeurs sont calculées en regroupant toutes les journées
+# des pêcheuses d'un même profil.
+#
+# Elles permettent de comparer les résultats avec les
+# probabilités obtenues en donnant le même poids à chaque
+# pêcheuse.
+
+
+probabilites_groupees <- probabilites_individuelles %>%
+  
+  group_by(profil) %>%
+  
+  summarise(
+    
+    p_peche_groupee =
+      sum(nb_jours_peche) / sum(nb_jours),
+    
+    p_rouge_groupee =
+      sum(nb_rouge) / sum(nb_zones_connues),
+    
+    p_jaune_groupee =
+      sum(nb_jaune) / sum(nb_zones_connues),
+    
+    p_vert_groupee =
+      sum(nb_vert) / sum(nb_zones_connues),
+    
+    .groups = "drop"
+    
+  )
+
+
+# Comparaison des deux méthodes
+
+comparaison_probabilites <- parametres_sma %>%
+  
+  left_join(
+    probabilites_groupees,
+    by = "profil"
+  )
+
+
+print(comparaison_probabilites)
+
+
+# ============================================================
+# 16. VERIFICATION DES PROBABILITES
+# ============================================================
+
+# Les trois probabilités de choix des zones doivent
+# totaliser 1 pour chaque profil.
+
+
+parametres_sma <- parametres_sma %>%
+  
+  mutate(
+    
+    somme_probabilites_zones =
+      p_rouge +
+      p_jaune +
+      p_vert
+    
+  )
+
+
+print(
+  parametres_sma %>%
+    
+    select(
+      profil,
+      p_peche,
+      p_rouge,
+      p_jaune,
+      p_vert,
+      somme_probabilites_zones
+    )
+)
+
+
+# Vérifier que les probabilités sont comprises entre 0 et 1
+
+stopifnot(
+  all(
+    parametres_sma$p_peche >= 0 &
+      parametres_sma$p_peche <= 1
+  )
+)
+
+
+stopifnot(
+  all(
+    abs(
+      parametres_sma$somme_probabilites_zones - 1
+    ) < 1e-8
+  )
+)
+
+
+# ============================================================
+# 17. TABLE FINALE POUR LE SYSTEME MULTI-AGENTS
+# ============================================================
+
+# On conserve uniquement les paramètres nécessaires
+# à la prise de décision des agents.
+
+
+parametres_sma_final <- parametres_sma %>%
+  
+  select(
+    
+    profil,
+    
+    nb_pecheuses,
+    
+    p_peche,
+    
+    p_rouge,
+    
+    p_jaune,
+    
+    p_vert
+    
+  )
+
+
+# Affichage des probabilités en pourcentage
+
+parametres_sma_pourcentage <- parametres_sma_final %>%
+  
+  mutate(
+    
+    across(
+      c(
+        p_peche,
+        p_rouge,
+        p_jaune,
+        p_vert
+      ),
+      ~ .x * 100
+    )
+    
+  )
+
+
+print(parametres_sma_final)
+
+print(parametres_sma_pourcentage)
+
+
+# ============================================================
+# 18. GRAPHIQUE DES PROBABILITES PAR PROFIL
+# ============================================================
+
+probabilites_longues <- parametres_sma_final %>%
+  
+  select(
+    
+    profil,
+    
+    p_peche,
+    
+    p_rouge,
+    
+    p_jaune,
+    
+    p_vert
+    
+  ) %>%
+  
+  pivot_longer(
+    
+    cols = -profil,
+    
+    names_to = "comportement",
+    
+    values_to = "probabilite"
+    
+  ) %>%
+  
+  mutate(
+    
+    comportement = recode(
+      
+      comportement,
+      
+      p_peche = "Aller pêcher",
+      
+      p_rouge = "Zone rouge",
+      
+      p_jaune = "Zone jaune",
+      
+      p_vert = "Zone verte"
+      
+    )
+    
+  )
+
+
+p_probabilites <- ggplot(
+  
+  probabilites_longues,
+  
+  aes(
+    
+    x = comportement,
+    
+    y = probabilite,
+    
+    fill = profil
+    
+  )
+  
+) +
+  
+  geom_col(
+    position = "dodge"
+  ) +
+  
+  scale_y_continuous(
+    labels = scales::percent_format()
+  ) +
+  
+  theme_minimal() +
+  
+  labs(
+    
+    title = "Paramètres comportementaux des trois profils",
+    
+    x = "Comportement",
+    
+    y = "Probabilité",
+    
+    fill = "Profil"
+    
+  )
+
+
+print(p_probabilites)
+
+
+
+
+
 
 
